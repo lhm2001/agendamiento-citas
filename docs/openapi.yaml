@@ -1,0 +1,290 @@
+openapi: 3.0.3
+info:
+  title: Medical Appointment API
+  description: |
+    Sistema de agendamiento de citas médicas para asegurados.
+    Soporta procesamiento asíncrono para múltiples países (PE, CL) usando arquitectura serverless en AWS.
+  version: 1.0.0
+  contact:
+    name: Lucia Heredia
+    email: lheredia@example.com
+
+servers:
+  - url: https://api.example.com/dev
+    description: Servidor de desarrollo
+  - url: https://api.example.com/prod
+    description: Servidor de producción
+
+tags:
+  - name: appointments
+    description: Operaciones de agendamiento de citas médicas
+
+paths:
+  /appointments:
+    post:
+      tags:
+        - appointments
+      summary: Crear un nuevo agendamiento
+      description: |
+        Crea un agendamiento de cita médica. El procesamiento es asíncrono.
+        La respuesta indica que el agendamiento está en proceso y el cliente
+        recibirá confirmación posteriormente.
+      operationId: createAppointment
+      parameters:
+        - $ref: '#/components/parameters/ApplicationIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAppointmentRequest'
+            examples:
+              Peru:
+                value:
+                  insuredId: "00123"
+                  scheduleId: 100
+                  countryISO: "PE"
+              Chile:
+                value:
+                  insuredId: "00456"
+                  scheduleId: 200
+                  countryISO: "CL"
+      responses:
+        '201':
+          description: Agendamiento creado exitosamente (en proceso)
+          headers:
+            Application-ID:
+              $ref: '#/components/headers/ApplicationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateAppointmentResponse'
+              example:
+                success: true
+                message: "Agendamiento en proceso. Recibirá confirmación pronto."
+                data:
+                  appointmentId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                  status: "pending"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /appointments/{insuredId}:
+    get:
+      tags:
+        - appointments
+      summary: Obtener agendamientos de un asegurado
+      description: Retorna todos los agendamientos de un asegurado específico
+      operationId: getAppointments
+      parameters:
+        - name: insuredId
+          in: path
+          required: true
+          description: Código del asegurado (5 dígitos)
+          schema:
+            type: string
+            pattern: '^\d{5}$'
+            example: "00123"
+        - $ref: '#/components/parameters/ApplicationIdHeader'
+      responses:
+        '200':
+          description: Lista de agendamientos obtenida exitosamente
+          headers:
+            Application-ID:
+              $ref: '#/components/headers/ApplicationId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetAppointmentsResponse'
+              example:
+                success: true
+                data:
+                  - appointmentId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                    insuredId: "00123"
+                    scheduleId: 100
+                    countryISO: "PE"
+                    status: "completed"
+                    createdAt: "2024-10-23T10:00:00.000Z"
+                    updatedAt: "2024-10-23T10:05:00.000Z"
+                    completedAt: "2024-10-23T10:05:00.000Z"
+                total: 1
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  schemas:
+    CreateAppointmentRequest:
+      type: object
+      required:
+        - insuredId
+        - scheduleId
+        - countryISO
+      properties:
+        insuredId:
+          type: string
+          pattern: '^\d{5}$'
+          description: Código del asegurado (5 dígitos, puede tener ceros adelante)
+          example: "00123"
+        scheduleId:
+          type: integer
+          minimum: 1
+          description: Identificador del espacio de agendamiento
+          example: 100
+        countryISO:
+          type: string
+          enum: [PE, CL]
+          description: Código ISO del país (PE=Perú, CL=Chile)
+          example: "PE"
+
+    CreateAppointmentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Agendamiento en proceso. Recibirá confirmación pronto."
+        data:
+          type: object
+          properties:
+            appointmentId:
+              type: string
+              format: uuid
+              description: ID único del agendamiento
+              example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+            status:
+              type: string
+              enum: [pending, completed, failed]
+              example: "pending"
+
+    GetAppointmentsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AppointmentDTO'
+        total:
+          type: integer
+          description: Número total de agendamientos
+          example: 5
+
+    AppointmentDTO:
+      type: object
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        insuredId:
+          type: string
+          pattern: '^\d{5}$'
+          example: "00123"
+        scheduleId:
+          type: integer
+          example: 100
+        countryISO:
+          type: string
+          enum: [PE, CL]
+          example: "PE"
+        status:
+          type: string
+          enum: [pending, completed, failed]
+          example: "completed"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2024-10-23T10:00:00.000Z"
+        updatedAt:
+          type: string
+          format: date-time
+          example: "2024-10-23T10:05:00.000Z"
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: "2024-10-23T10:05:00.000Z"
+        errorMessage:
+          type: string
+          nullable: true
+          example: null
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: "Error en la validación"
+        errorCode:
+          type: string
+          example: "VALIDATION_ERROR"
+        details:
+          type: object
+          additionalProperties: true
+          description: Detalles adicionales (solo en desarrollo)
+
+  parameters:
+    ApplicationIdHeader:
+      name: Application-ID
+      in: header
+      required: false
+      description: Identificador de la aplicación cliente
+      schema:
+        type: string
+        example: "web-app-swagger"
+
+
+  headers:
+    ApplicationId:
+      description: Identificador de la aplicación
+      schema:
+        type: string
+        example: "medical-appointment-api"
+
+
+  responses:
+    BadRequest:
+      description: Error de validación en la petición
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Validación fallida: insuredId debe ser un código de 5 dígitos"
+            errorCode: "VALIDATION_ERROR"
+
+    Conflict:
+      description: Conflicto - el recurso no está disponible
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "El espacio de agendamiento 100 no está disponible"
+            errorCode: "SCHEDULE_NOT_AVAILABLE"
+
+    InternalError:
+      description: Error interno del servidor
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            success: false
+            message: "Error interno del servidor"
+            errorCode: "INTERNAL_ERROR"
+

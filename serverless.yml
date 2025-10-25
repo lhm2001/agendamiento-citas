@@ -1,0 +1,351 @@
+service: medical-appointment-api
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 512
+  timeout: 30
+  environment:
+    STAGE: ${self:provider.stage}
+    DYNAMODB_TABLE: ${self:custom.dynamoTableName}
+    SNS_TOPIC_PE: ${self:custom.snsTopicPE}
+    SNS_TOPIC_CL: ${self:custom.snsTopicCL}
+    SQS_PE: ${self:custom.sqsPE}
+    SQS_CL: ${self:custom.sqsCL}
+    SQS_COMPLETION: ${self:custom.sqsCompletion}
+    EVENTBRIDGE_BUS: ${self:custom.eventBridgeBus}
+    # RDS configurado con valores por defecto para testing (no funcional sin RDS real)
+    RDS_HOST_PE: ${env:RDS_HOST_PE, 'localhost'}
+    RDS_PORT_PE: ${env:RDS_PORT_PE, '3306'}
+    RDS_DATABASE_PE: ${env:RDS_DATABASE_PE, 'appointments_pe'}
+    RDS_USER_PE: ${env:RDS_USER_PE, 'admin'}
+    RDS_PASSWORD_PE: ${env:RDS_PASSWORD_PE, 'password'}
+    RDS_HOST_CL: ${env:RDS_HOST_CL, 'localhost'}
+    RDS_PORT_CL: ${env:RDS_PORT_CL, '3306'}
+    RDS_DATABASE_CL: ${env:RDS_DATABASE_CL, 'appointments_cl'}
+    RDS_USER_CL: ${env:RDS_USER_CL, 'admin'}
+    RDS_PASSWORD_CL: ${env:RDS_PASSWORD_CL, 'password'}
+    LOG_LEVEL: ${env:LOG_LEVEL, 'info'}
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - dynamodb:Scan
+          Resource:
+            - !GetAtt AppointmentsTable.Arn
+            - !Sub '${AppointmentsTable.Arn}/index/*'
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource:
+            - !Ref AppointmentTopicPE
+            - !Ref AppointmentTopicCL
+        - Effect: Allow
+          Action:
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - sqs:GetQueueAttributes
+          Resource:
+            - !GetAtt AppointmentQueuePE.Arn
+            - !GetAtt AppointmentQueueCL.Arn
+            - !GetAtt AppointmentCompletionQueue.Arn
+        - Effect: Allow
+          Action:
+            - events:PutEvents
+          Resource:
+            - !GetAtt AppointmentEventBus.Arn
+
+plugins:
+  - serverless-offline
+
+package:
+  patterns:
+    - '!src/**'
+    - '!scripts/**'
+    - '!**/*.test.ts'
+    - '!**/*.test.js'
+    - 'dist/**'
+    - 'node_modules/**'
+    - 'docs/openapi.yaml'
+
+custom:
+  dynamoTableName: appointments-${self:provider.stage}
+  snsTopicPE: !Ref AppointmentTopicPE
+  snsTopicCL: !Ref AppointmentTopicCL
+  sqsPE: !GetAtt AppointmentQueuePE.QueueName
+  sqsCL: !GetAtt AppointmentQueueCL.QueueName
+  sqsCompletion: !GetAtt AppointmentCompletionQueue.QueueName
+  eventBridgeBus: !Ref AppointmentEventBus
+
+functions:
+  # Lambda principal: recibe peticiones HTTP
+  appointment:
+    handler: index.handler
+    events:
+      - http:
+          path: /appointments
+          method: post
+          cors: true
+      - http:
+          path: /appointments/{insuredId}
+          method: get
+          cors: true
+    environment:
+      FUNCTION_NAME: appointment
+
+  # Lambda para procesar agendamientos en Perú
+  appointmentPE:
+    handler: index-pe.handler
+    events:
+      - sqs:
+          arn: !GetAtt AppointmentQueuePE.Arn
+          batchSize: 10
+    environment:
+      FUNCTION_NAME: appointment_pe
+      COUNTRY_ISO: PE
+
+  # Lambda para procesar agendamientos en Chile
+  appointmentCL:
+    handler: index-cl.handler
+    events:
+      - sqs:
+          arn: !GetAtt AppointmentQueueCL.Arn
+          batchSize: 10
+    environment:
+      FUNCTION_NAME: appointment_cl
+      COUNTRY_ISO: CL
+
+  # Lambda para completar agendamientos
+  appointmentCompletion:
+    handler: index-completion.handler
+    events:
+      - sqs:
+          arn: !GetAtt AppointmentCompletionQueue.Arn
+          batchSize: 10
+    environment:
+      FUNCTION_NAME: appointment_completion
+
+  # Lambda para Swagger UI
+  swagger:
+    handler: index-swagger.handler
+    events:
+      - http:
+          path: /swagger
+          method: ANY
+          cors: true
+      - http:
+          path: /swagger/{proxy+}
+          method: ANY
+          cors: true
+    environment:
+      FUNCTION_NAME: swagger
+
+resources:
+  Resources:
+    # DynamoDB Table
+    AppointmentsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:custom.dynamoTableName}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: appointmentId
+            AttributeType: S
+          - AttributeName: insuredId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+        KeySchema:
+          - AttributeName: appointmentId
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: InsuredIdIndex
+            KeySchema:
+              - AttributeName: insuredId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    # SNS Topics
+    AppointmentTopicPE:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: appointment-topic-pe-${self:provider.stage}
+        DisplayName: Tópico de agendamientos para Perú
+
+    AppointmentTopicCL:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: appointment-topic-cl-${self:provider.stage}
+        DisplayName: Tópico de agendamientos para Chile
+
+    # SQS Queues
+    AppointmentQueuePE:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-queue-pe-${self:provider.stage}
+        VisibilityTimeout: 180
+        MessageRetentionPeriod: 1209600
+        ReceiveMessageWaitTimeSeconds: 20
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt AppointmentDLQPE.Arn
+          maxReceiveCount: 3
+
+    AppointmentDLQPE:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-dlq-pe-${self:provider.stage}
+        MessageRetentionPeriod: 1209600
+
+    AppointmentQueueCL:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-queue-cl-${self:provider.stage}
+        VisibilityTimeout: 180
+        MessageRetentionPeriod: 1209600
+        ReceiveMessageWaitTimeSeconds: 20
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt AppointmentDLQCL.Arn
+          maxReceiveCount: 3
+
+    AppointmentDLQCL:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-dlq-cl-${self:provider.stage}
+        MessageRetentionPeriod: 1209600
+
+    AppointmentCompletionQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-completion-queue-${self:provider.stage}
+        VisibilityTimeout: 180
+        MessageRetentionPeriod: 1209600
+        ReceiveMessageWaitTimeSeconds: 20
+
+    # SNS to SQS Subscriptions
+    AppointmentSubscriptionPE:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: sqs
+        TopicArn: !Ref AppointmentTopicPE
+        Endpoint: !GetAtt AppointmentQueuePE.Arn
+        RawMessageDelivery: true
+
+    AppointmentSubscriptionCL:
+      Type: AWS::SNS::Subscription
+      Properties:
+        Protocol: sqs
+        TopicArn: !Ref AppointmentTopicCL
+        Endpoint: !GetAtt AppointmentQueueCL.Arn
+        RawMessageDelivery: true
+
+    # SQS Queue Policies
+    AppointmentQueuePolicyPE:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref AppointmentQueuePE
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt AppointmentQueuePE.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref AppointmentTopicPE
+
+    AppointmentQueuePolicyCL:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref AppointmentQueueCL
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt AppointmentQueueCL.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref AppointmentTopicCL
+
+    # EventBridge
+    AppointmentEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: appointment-events-${self:provider.stage}
+
+    # EventBridge Rule to SQS
+    AppointmentCompletionRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: appointment-completion-rule-${self:provider.stage}
+        EventBusName: !Ref AppointmentEventBus
+        EventPattern:
+          source:
+            - appointment.processor
+          detail-type:
+            - AppointmentCompleted
+        State: ENABLED
+        Targets:
+          - Arn: !GetAtt AppointmentCompletionQueue.Arn
+            Id: AppointmentCompletionTarget
+
+    # EventBridge to SQS Permission
+    AppointmentCompletionQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - !Ref AppointmentCompletionQueue
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sqs:SendMessage
+              Resource: !GetAtt AppointmentCompletionQueue.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt AppointmentCompletionRule.Arn
+
+  Outputs:
+    AppointmentsTableName:
+      Value: !Ref AppointmentsTable
+      Export:
+        Name: ${self:provider.stage}-AppointmentsTable
+
+    AppointmentTopicPEArn:
+      Value: !Ref AppointmentTopicPE
+      Export:
+        Name: ${self:provider.stage}-AppointmentTopicPE
+
+    AppointmentTopicCLArn:
+      Value: !Ref AppointmentTopicCL
+      Export:
+        Name: ${self:provider.stage}-AppointmentTopicCL
+
+    AppointmentQueuePEUrl:
+      Value: !Ref AppointmentQueuePE
+      Export:
+        Name: ${self:provider.stage}-AppointmentQueuePE
+
+    AppointmentQueueCLUrl:
+      Value: !Ref AppointmentQueueCL
+      Export:
+        Name: ${self:provider.stage}-AppointmentQueueCL
+
